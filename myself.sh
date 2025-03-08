@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# System Required:  CentOS 7+, Debian10+, Ubuntu16+
+# System Required:  CentOS 7+, Debian9+, Ubuntu16+
 # Description:      Script to Xray manage
 #
 # Copyright (C) 2023 zxcvos
@@ -9,594 +9,686 @@
 # Xray-core: https://github.com/XTLS/Xray-core
 # REALITY: https://github.com/XTLS/REALITY
 # Xray-examples: https://github.com/chika0801/Xray-examples
-# Nginx Config: https://www.digitalocean.com/community/tools/nginx?domains.0.server.wwwSubdomain=true&domains.0.https.hstsPreload=true&domains.0.php.php=false&domains.0.reverseProxy.reverseProxy=true&domains.0.reverseProxy.proxyHostHeader=%24proxy_host&domains.0.routing.root=false&domains.0.logging.accessLogEnabled=false&domains.0.logging.errorLogEnabled=false&global.https.portReuse=true&global.nginx.user=root&global.nginx.clientMaxBodySize=50&global.app.lang=zhCN
-# Nginx Install: https://nginx.org/en/linux_packages.html
-# ACME: https://github.com/acmesh-official/acme.sh
-# Cloudreve: https://github.com/cloudreve/cloudreve
+# Docker cloudflare-warp: https://github.com/e7h4n/cloudflare-warp
+# Cloudflare Warp: https://github.com/haoel/haoel.github.io#943-docker-%E4%BB%A3%E7%90%86
 
 readonly RED='\033[1;31;31m'
 readonly GREEN='\033[1;31;32m'
 readonly YELLOW='\033[1;31;33m'
 readonly NC='\033[0m'
+readonly xray_config_manage='/usr/local/etc/xray-script/xray_config_manage.sh'
 
 declare domain
-declare new_ssh_port
-declare is_mainline
+declare domain_path
+declare new_port
 
 function _info() {
-    printf "${GREEN}[Info] ${NC}"
-    printf -- "%s" "$1"
-    printf "\n"
+  printf "${GREEN}[信息] ${NC}"
+  printf -- "%s" "$1"
+  printf "\n"
 }
 
 function _warn() {
-    printf "${YELLOW}[Warning] ${NC}"
-    printf -- "%s" "$1"
-    printf "\n"
+  printf "${YELLOW}[警告] ${NC}"
+  printf -- "%s" "$1"
+  printf "\n"
 }
 
 function _error() {
-    printf "${RED}[Error] ${NC}"
-    printf -- "%s" "$1"
-    printf "\n"
-    exit 1
+  printf "${RED}[错误] ${NC}"
+  printf -- "%s" "$1"
+  printf "\n"
+  exit 1
 }
 
 function _exists() {
-    local cmd="$1"
-    if eval type type > /dev/null 2>&1; then
-        eval type "$cmd" > /dev/null 2>&1
-    elif command > /dev/null 2>&1; then
-        command -v "$cmd" > /dev/null 2>&1
-    else
-        which "$cmd" > /dev/null 2>&1
-    fi
-    local rt=$?
-    return ${rt}
+  local cmd="$1"
+  if eval type type >/dev/null 2>&1; then
+    eval type "$cmd" >/dev/null 2>&1
+  elif command >/dev/null 2>&1; then
+    command -v "$cmd" >/dev/null 2>&1
+  else
+    which "$cmd" >/dev/null 2>&1
+  fi
+  local rt=$?
+  return ${rt}
 }
 
 function _os() {
-    local os=""
-    [ -f "/etc/debian_version" ] && source /etc/os-release && os="${ID}" && printf -- "%s" "${os}" && return
-    [ -f "/etc/redhat-release" ] && os="centos" && printf -- "%s" "${os}" && return
+  local os=""
+  [ -f "/etc/debian_version" ] && source /etc/os-release && os="${ID}" && printf -- "%s" "${os}" && return
+  [ -f "/etc/redhat-release" ] && os="centos" && printf -- "%s" "${os}" && return
 }
 
 function _os_full() {
-    [ -f /etc/redhat-release ] && awk '{print ($1,$3~/^[0-9]/?$3:$4)}' /etc/redhat-release && return
-    [ -f /etc/os-release ] && awk -F'[= "]' '/PRETTY_NAME/{print $3,$4,$5}' /etc/os-release && return
-    [ -f /etc/lsb-release ] && awk -F'[="]+' '/DESCRIPTION/{print $2}' /etc/lsb-release && return
+  [ -f /etc/redhat-release ] && awk '{print ($1,$3~/^[0-9]/?$3:$4)}' /etc/redhat-release && return
+  [ -f /etc/os-release ] && awk -F'[= "]' '/PRETTY_NAME/{print $3,$4,$5}' /etc/os-release && return
+  [ -f /etc/lsb-release ] && awk -F'[="]+' '/DESCRIPTION/{print $2}' /etc/lsb-release && return
 }
 
 function _os_ver() {
-    local main_ver="$( echo $(_os_full) | grep -oE "[0-9.]+")"
-    printf -- "%s" "${main_ver%%.*}"
+  local main_ver="$(echo $(_os_full) | grep -oE "[0-9.]+")"
+  printf -- "%s" "${main_ver%%.*}"
 }
 
 function _error_detect() {
-    local cmd="$1"
-    _info "${cmd}"
-    eval ${cmd}
-    if [ $? -ne 0 ]; then
-        _error "Execution command (${cmd}) failed, please check it and try again."
-    fi
+  local cmd="$1"
+  _info "${cmd}"
+  eval ${cmd}
+  if [ $? -ne 0 ]; then
+    _error "Execution command (${cmd}) failed, please check it and try again."
+  fi
+}
+
+function _is_digit() {
+  local input=${1}
+  if [[ "$input" =~ ^[0-9]+$ ]]; then
+    return 0
+  else
+    return 1
+  fi
+}
+
+function _version_ge() {
+  test "$(echo "$@" | tr ' ' '\n' | sort -rV | head -n 1)" == "$1"
+}
+
+function _is_tlsv1_3_h2() {
+  local check_url=$(echo $1 | grep -oE '[^/]+(\.[^/]+)+\b' | head -n 1)
+  local check_num=$(echo QUIT | stdbuf -oL openssl s_client -connect "${check_url}:443" -tls1_3 -alpn h2 2>&1 | grep -Eoi '(TLSv1.3)|(^ALPN\s+protocol:\s+h2$)|(X25519)' | sort -u | wc -l)
+  if [[ ${check_num} -eq 3 ]]; then
+    return 0
+  else
+    return 1
+  fi
 }
 
 function _install_update() {
-    local package_name="$@"
-    case "$(_os)" in
-        centos)
-            if _exists "yum"; then
-                yum update -y
-                _error_detect "yum install -y epel-release yum-utils"
-                yum update -y
-                _error_detect "yum install -y ${package_name}"
-            elif _exists "dnf"; then
-                dnf update -y
-                _error_detect "dnf install -y dnf-plugins-core"
-                dnf update -y
-                _error_detect "dnf install -y ${package_name}"
-            fi
-            ;;
-        ubuntu|debian)
-            apt update -y
-            _error_detect "apt install -y ${package_name}"
-            ;;
-    esac
-}
-
-function _purge() {
-    local package_name="$@"
-    case "$(_os)" in
-        centos)
-            if _exists "yum"; then
-                yum purge -y ${package_name}
-                yum autoremove -y
-            elif _exists "dnf"; then
-                dnf purge -y ${package_name}
-                dnf autoremove -y
-            fi
-            ;;
-        ubuntu|debian)
-            apt purge -y ${package_name}
-            apt autoremove -y
-            ;;
-    esac
+  local package_name="$@"
+  case "$(_os)" in
+  centos)
+    if _exists "yum"; then
+      yum update -y
+      _error_detect "yum install -y epel-release yum-utils"
+      yum update -y
+      _error_detect "yum install -y ${package_name}"
+    elif _exists "dnf"; then
+      dnf update -y
+      _error_detect "dnf install -y dnf-plugins-core"
+      dnf update -y
+      _error_detect "dnf install -y ${package_name}"
+    fi
+    ;;
+  ubuntu | debian)
+    apt update -y
+    _error_detect "apt install -y ${package_name}"
+    ;;
+  esac
 }
 
 function _systemctl() {
-    local cmd="$1"
-    local server_name="$2"
-    case "${cmd}" in
-        start)
-            systemctl -q is-active ${server_name} || systemctl -q start ${server_name}
-            systemctl -q is-enabled ${server_name} || systemctl -q enable ${server_name}
-            sleep 2
-        ;;
-        stop)
-            systemctl -q is-active ${server_name} && systemctl -q stop ${server_name}
-            systemctl -q is-enabled ${server_name} && systemctl -q disable ${server_name}
-        ;;
-        restart)
-            systemctl -q is-active ${server_name} && systemctl -q restart ${server_name} || systemctl -q start ${server_name}
-            systemctl -q is-enabled ${server_name} || systemctl -q enable ${server_name}
-            sleep 2
-        ;;
-        dr)
-            systemctl daemon-reload
-        ;;
-    esac
+  local cmd="$1"
+  local server_name="$2"
+  case "${cmd}" in
+  start)
+    _info "正在启动 ${server_name} 服务"
+    systemctl -q is-active ${server_name} || systemctl -q start ${server_name}
+    systemctl -q is-enabled ${server_name} || systemctl -q enable ${server_name}
+    sleep 2
+    systemctl -q is-active ${server_name} && _info "已启动 ${server_name} 服务" || _error "${server_name} 启动失败"
+    ;;
+  stop)
+    _info "正在暂停 ${server_name} 服务"
+    systemctl -q is-active ${server_name} && systemctl -q stop ${server_name}
+    systemctl -q is-enabled ${server_name} && systemctl -q disable ${server_name}
+    sleep 2
+    systemctl -q is-active ${server_name} || _info "已暂停 ${server_name} 服务"
+    ;;
+  restart)
+    _info "正在重启 ${server_name} 服务"
+    systemctl -q is-active ${server_name} && systemctl -q restart ${server_name} || systemctl -q start ${server_name}
+    systemctl -q is-enabled ${server_name} || systemctl -q enable ${server_name}
+    sleep 2
+    systemctl -q is-active ${server_name} && _info "已重启 ${server_name} 服务" || _error "${server_name} 启动失败"
+    ;;
+  reload)
+    _info "正在重载 ${server_name} 服务"
+    systemctl -q is-active ${server_name} && systemctl -q reload ${server_name} || systemctl -q start ${server_name}
+    systemctl -q is-enabled ${server_name} || systemctl -q enable ${server_name}
+    sleep 2
+    systemctl -q is-active ${server_name} && _info "已重载 ${server_name} 服务"
+    ;;
+  dr)
+    _info "正在重载 systemd 配置文件"
+    systemctl daemon-reload
+    ;;
+  esac
 }
 
-function _read_domain() {
-    until [[ ${is_domain} =~ ^[Yy]$ ]]
-    do
-        read -p "请输入域名：" domain
-        check_domain=$(echo ${domain} | grep -oE '[^/]+(\.[^/]+)+\b' | head -n 1)
-        read -r -p  "请确认域名: \"${check_domain}\" [y/n] " is_domain
-    done
-    domain=${check_domain}
+function _print_list() {
+  local p_list=($@)
+  for ((i = 1; i <= ${#p_list[@]}; i++)); do
+    hint="${p_list[$i - 1]}"
+    echo -e "${GREEN}${i}${NC}) ${hint}"
+  done
 }
 
-function _read_ssh() {
-    until [[ ${is_ssh_port} =~ ^[Yy]$ ]]
-    do
-        echo "当前 ssh 连接端口为: $(sed -En "s/^[#pP].*ort\s*([0-9]*)$/\1/p" /etc/ssh/sshd_config)"
-        read -p "请输入新的 ssh 连接端口(1-65535)：" new_ssh_port
-        [[ ${new_ssh_port} -lt 1 && ${new_ssh_port} -gt 65535 ]] && continue
-        read -r -p  "请确认端口: \"${new_ssh_port}\" [y/n] " is_ssh_port
+function select_data() {
+  local data_list=($(awk -v FS=',' '{for (i=1; i<=NF; i++) arr[i]=$i} END{for (i in arr) print arr[i]}' <<<"${1}"))
+  local index_list=($(awk -v FS=',' '{for (i=1; i<=NF; i++) arr[i]=$i} END{for (i in arr) print arr[i]}' <<<"${2}"))
+  local result_list=()
+  if [ ${#index_list[@]} -ne 0 ]; then
+    for i in "${index_list[@]}"; do
+      if _is_digit "${i}" && [ ${i} -ge 1 ] && [ ${i} -le ${#data_list[@]} ]; then
+        i=$((i - 1))
+        result_list+=("${data_list[${i}]}")
+      fi
     done
+  else
+    result_list=("${data_list[@]}")
+  fi
+  if [ ${#result_list[@]} -eq 0 ]; then
+    result_list=("${data_list[@]}")
+  fi
+  echo "${result_list[@]}"
+}
+
+function select_dest() {
+  local dest_list=($(jq '.xray.serverNames | keys_unsorted' /usr/local/etc/xray-script/config.json | grep -Eoi '".*"' | sed -En 's|"(.*)"|\1|p'))
+  local cur_dest=$(jq -r '.xray.dest' /usr/local/etc/xray-script/config.json)
+  local pick_dest=""
+  local all_sns=""
+  local sns=""
+  local prompt="请选择你的 dest, 当前默认使用 \"${cur_dest}\", 自填选 0: "
+  until [[ ${is_dest} =~ ^[Yy]$ ]]; do
+    echo -e "---------------- dest 列表 -----------------"
+    _print_list "${dest_list[@]}"
+    read -p "${prompt}" pick
+    if [[ "${pick}" == "" && "${cur_dest}" != "" ]]; then
+      pick_dest=${cur_dest}
+      break
+    fi
+    if ! _is_digit "${pick}" || [[ "${pick}" -lt 0 || "${pick}" -gt ${#dest_list[@]} ]]; then
+      prompt="输入错误, 请输入 0-${#dest_list[@]} 之间的数字: "
+      continue
+    fi
+    if [[ "${pick}" == "0" ]]; then
+      _warn "如果输入列表中已有域名将会导致 serverNames 被修改"
+      _warn "使用自填域名时，请确保该域名在国内的连通性"
+      read_domain
+      _info "正在检查 \"${domain}\" 是否支持 TLSv1.3 与 h2"
+      if ! _is_tlsv1_3_h2 "${domain}"; then
+        _warn "\"${domain}\" 不支持 TLSv1.3 或 h2 ，亦或者 Client Hello 不是 X25519"
+        continue
+      fi
+      _info "\"${domain}\" 支持 TLSv1.3 与 h2"
+      _info "正在获取 Allowed domains"
+      pick_dest=${domain}
+      all_sns=$(xray tls ping ${pick_dest} | sed -n '/with SNI/,$p' | sed -En 's/\[(.*)\]/\1/p' | sed -En 's/Allowed domains:\s*//p' | jq -R -c 'split(" ")' | jq --arg sni "${pick_dest}" '. += [$sni]')
+      sns=$(echo ${all_sns} | jq 'map(select(test("^[^*]+$"; "g")))' | jq -c 'map(select(test("^((?!cloudflare|akamaized|edgekey|edgesuite|cloudfront|azureedge|msecnd|edgecastcdn|fastly|googleusercontent|kxcdn|maxcdn|stackpathdns|stackpathcdn).)*$"; "ig")))')
+      _info "过滤通配符前的 SNI"
+      _print_list $(echo ${all_sns} | jq -r '.[]')
+      _info "过滤通配符后的 SNI"
+      _print_list $(echo ${sns} | jq -r '.[]')
+      read -p "请选择要使用的 serverName ，用英文逗号分隔， 默认全选: " pick_num
+      sns=$(select_data "$(awk 'BEGIN{ORS=","} {print}' <<<"$(echo ${sns} | jq -r -c '.[]')")" "${pick_num}" | jq -R -c 'split(" ")')
+      _info "如果有更多的 serverNames 请在 /usr/local/etc/xray-script/config.json 中自行编辑"
+    else
+      pick_dest="${dest_list[${pick} - 1]}"
+    fi
+    read -r -p "是否使用 dest: \"${pick_dest}\" [y/n] " is_dest
+    prompt="请选择你的 dest, 当前默认使用 \"${cur_dest}\", 自填选 0: "
+    echo -e "-------------------------------------------"
+  done
+  _info "正在修改配置"
+  [ "${domain_path}" != "" ] && pick_dest="${pick_dest}${domain_path}"
+  if echo ${pick_dest} | grep -q '/$'; then
+    pick_dest=$(echo ${pick_dest} | sed -En 's|/+$||p')
+  fi
+  [ "${sns}" != "" ] && jq --argjson sn "{\"${pick_dest}\": ${sns}}" '.xray.serverNames += $sn' /usr/local/etc/xray-script/config.json >/usr/local/etc/xray-script/new.json && mv -f /usr/local/etc/xray-script/new.json /usr/local/etc/xray-script/config.json
+  jq --arg dest "${pick_dest}" '.xray.dest = $dest' /usr/local/etc/xray-script/config.json >/usr/local/etc/xray-script/new.json && mv -f /usr/local/etc/xray-script/new.json /usr/local/etc/xray-script/config.json
+}
+
+function read_domain() {
+  until [[ ${is_domain} =~ ^[Yy]$ ]]; do
+    read -p "请输入域名：" domain
+    check_domain=$(echo ${domain} | grep -oE '[^/]+(\.[^/]+)+\b' | head -n 1)
+    read -r -p "请确认域名: \"${check_domain}\" [y/n] " is_domain
+  done
+  domain_path=$(echo "${domain}" | sed -En "s|.*${check_domain}(/.*)?|\1|p")
+  domain=${check_domain}
+}
+
+function read_port() {
+  local prompt="${1}"
+  local cur_port="${2}"
+  until [[ ${is_port} =~ ^[Yy]$ ]]; do
+    echo "${prompt}"
+    read -p "请输入自定义的端口(1-65535), 默认不修改: " new_port
+    if [[ "${new_port}" == "" || ${new_port} -eq ${cur_port} ]]; then
+      new_port=${cur_port}
+      _info "不修改，继续使用原端口: ${cur_port}"
+      break
+    fi
+    if ! _is_digit "${new_port}" || [[ ${new_port} -lt 1 || ${new_port} -gt 65535 ]]; then
+      prompt="输入错误, 端口范围是 1-65535 之间的数字"
+      continue
+    fi
+    read -r -p "请确认端口: \"${new_port}\" [y/n] " is_port
+    prompt="${1}"
+  done
+}
+
+function read_uuid() {
+  _info '自定义输入的 uuid ，如果不是标准格式，将会使用 xray uuid -i "自定义字符串" 进行 UUIDv5 映射后填入配置'
+  read -p "请输入自定义 UUID, 默认则自动生成: " in_uuid
 }
 
 function check_os() {
-    [ -z "$(_os)" ] && _error "Not supported OS"
-    case "$(_os)" in
-        ubuntu)
-            [ -n "$(_os_ver)" -a "$(_os_ver)" -lt 16 ] && _error "Not supported OS, please change to Ubuntu 16+ and try again."
-            ;;
-        debian)
-            [ -n "$(_os_ver)" -a "$(_os_ver)" -lt 10 ] &&  _error "Not supported OS, please change to Debian 10+ and try again."
-            ;;
-        centos)
-            [ -n "$(_os_ver)" -a "$(_os_ver)" -lt 7 ] &&  _error "Not supported OS, please change to CentOS 7+ and try again."
-            ;;
-        *)
-            _error "Not supported OS"
-            ;;
-    esac
+  [ -z "$(_os)" ] && _error "Not supported OS"
+  case "$(_os)" in
+  ubuntu)
+    [ -n "$(_os_ver)" -a "$(_os_ver)" -lt 16 ] && _error "Not supported OS, please change to Ubuntu 16+ and try again."
+    ;;
+  debian)
+    [ -n "$(_os_ver)" -a "$(_os_ver)" -lt 9 ] && _error "Not supported OS, please change to Debian 9+ and try again."
+    ;;
+  centos)
+    [ -n "$(_os_ver)" -a "$(_os_ver)" -lt 7 ] && _error "Not supported OS, please change to CentOS 7+ and try again."
+    ;;
+  *)
+    _error "Not supported OS"
+    ;;
+  esac
 }
 
 function install_dependencies() {
-    _install_update "ca-certificates openssl lsb-release curl wget jq tzdata"
-    case "$(_os)" in
-        centos)
-            _install_update "crontabs util-linux iproute procps-ng"
-            ;;
-        debian|ubuntu)
-            _install_update "cron bsdmainutils iproute2 procps"
-            ;;
-    esac
-}
-
-function install_nginx_dependencies() {
-    case "$(_os)" in
-        centos)
-            wget -O /etc/yum.repos.d/nginx.repo https://raw.githubusercontent.com/zxcvos/Xray-script/main/repo/nginx.repo
-            ;;
-        debian|ubuntu)
-            [[ ${is_mainline} =~ ^[Yy]$ ]] && mainline="/mainline"
-            [ "debian" -eq "$(_os)" ] && _install_update "debian-archive-keyring" || _install_update "ubuntu-keyring"
-            rm -rf /etc/apt/sources.list.d/nginx.list
-            curl https://nginx.org/keys/nginx_signing.key | gpg --dearmor \
-                | sudo tee /usr/share/keyrings/nginx-archive-keyring.gpg >/dev/null
-            echo "deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] \
-            http://nginx.org/packages${mainline}/$(_os) `lsb_release -cs` nginx" \
-                | sudo tee /etc/apt/sources.list.d/nginx.list
-            echo -e "Package: *\nPin: origin nginx.org\nPin: release o=nginx\nPin-Priority: 900\n" \
-                | sudo tee /etc/apt/preferences.d/99nginx
-            ;;
-    esac
+  _info "正在下载相关依赖"
+  _install_update "ca-certificates openssl lsb-release curl wget jq tzdata"
+  case "$(_os)" in
+  centos)
+    _install_update "crontabs util-linux iproute procps-ng"
+    ;;
+  debian | ubuntu)
+    _install_update "cron bsdmainutils iproute2 procps"
+    ;;
+  esac
 }
 
 function install_update_xray() {
-    _info "installing or updating Xray..."
-    _error_detect 'bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install -u root --beta'
-    jq --arg ver "$(xray version | head -n 1 | cut -d \( -f 1 | grep -Eoi '[0-9.]*')" '.xray.version = $ver' /usr/local/etc/xray-script/config.json > /usr/local/etc/xray-script/new.json && mv -f /usr/local/etc/xray-script/new.json /usr/local/etc/xray-script/config.json
-    wget -O /usr/local/etc/xray-script/update-dat.sh https://raw.githubusercontent.com/zxcvos/Xray-script/main/tool/update-dat.sh
-    chmod a+x /usr/local/etc/xray-script/update-dat.sh
-    crontab -l | { cat; echo "30 22 * * * /usr/local/etc/xray-script/update-dat.sh >/dev/null 2>&1"; } | uniq | crontab -
-    /usr/local/etc/xray-script/update-dat.sh
+  _info "正在安装或更新 Xray"
+  _error_detect 'bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install -u root --beta'
+  jq --arg ver "$(xray version | head -n 1 | cut -d \( -f 1 | grep -Eoi '[0-9.]*')" '.xray.version = $ver' /usr/local/etc/xray-script/config.json >/usr/local/etc/xray-script/new.json && mv -f /usr/local/etc/xray-script/new.json /usr/local/etc/xray-script/config.json
+  wget -O /usr/local/etc/xray-script/update-dat.sh https://raw.githubusercontent.com/zxcvos/Xray-script/main/tool/update-dat.sh
+  chmod a+x /usr/local/etc/xray-script/update-dat.sh
+  crontab -l | {
+    cat
+    echo "30 22 * * * /usr/local/etc/xray-script/update-dat.sh >/dev/null 2>&1"
+  } | uniq | crontab -
+  /usr/local/etc/xray-script/update-dat.sh
 }
 
 function purge_xray() {
-    _info "removing Xray..."
-    crontab -l | grep -v "/usr/local/etc/xray-script/update-dat.sh >/dev/null 2>&1" | crontab -
-    _systemctl "stop" "xray"
-    bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ remove --purge
-    rm -rf /etc/systemd/system/xray.service
-    rm -rf /etc/systemd/system/xray@.service
-    rm -rf /usr/local/bin/xray
-    rm -rf /usr/local/etc/xray
-    rm -rf /usr/local/share/xray
-    rm -rf /var/log/xray
-}
-
-function install_update_nginx() {
-    _info "installing or updating nignx..."
-    install_nginx_dependencies
-    _install_update "nginx"
-    jq --arg ver "$(nginx -V 2>&1 | grep "^nginx version:.*" | cut -d / -f 2)" '.nginx.version = $ver' /usr/local/etc/xray-script/config.json > /usr/local/etc/xray-script/new.json && mv -f /usr/local/etc/xray-script/new.json /usr/local/etc/xray-script/config.json
-}
-
-function purge_nginx() {
-    _info "removing nignx..."
-    _systemctl "stop" "nginx"
-    _purge "nginx"
-    rm -rf /etc/nginx
-    rm -rf /etc/systemd/system/nginx.service
-    rm -rf /var/log/nginx
-    _systemctl dr
-}
-
-function install_update_cloudreve() {
-    _info "installing or updating cloudreve..."
-    [ -d /usr/local/cloudreve ] || mkdir -p /usr/local/cloudreve
-    local cloudreve_version="$(wget -qO- --no-check-certificate https://api.github.com/repos/cloudreve/cloudreve/releases/latest | grep 'tag_name' | cut -d \" -f 4)"
-    jq --arg ver "${cloudreve_version}" '.cloudreve.version = $ver' /usr/local/etc/xray-script/config.json > /usr/local/etc/xray-script/new.json && mv -f /usr/local/etc/xray-script/new.json /usr/local/etc/xray-script/config.json
-    local machine
-    case "$(uname -m)" in
-    'amd64' | 'x86_64')
-        machine='amd64'
-        ;;
-    'armv5tel' | 'armv6l' | 'armv7' | 'armv7l')
-        machine='arm'
-        ;;
-    'armv8' | 'aarch64')
-        machine='arm64'
-        ;;
-    *)
-        machine='amd64'
-        ;;
-    esac
-    [ -e /usr/local/cloudreve/cloudreve ] && _systemctl "stop" "cloudreve" && rm -rf /usr/local/cloudreve/cloudreve
-    wget -O cloudreve.tar.gz "https://github.com/cloudreve/Cloudreve/releases/download/${cloudreve_version}/cloudreve_${cloudreve_version}_linux_${machine}.tar.gz"
-    tar -xzf cloudreve.tar.gz -C /usr/local/cloudreve
-    chmod +x /usr/local/cloudreve/cloudreve
-    rm -rf cloudreve.tar.gz
-}
-
-function purge_cloudreve() {
-    _info "removing cloudreve..."
-    _systemctl "stop" "cloudreve"
-    rm -rf /usr/local/cloudreve
-    rm -rf /etc/systemd/system/cloudreve.service
-}
-
-function install_acme_sh() {
-    curl https://get.acme.sh | sh
-    ${HOME}/.acme.sh/acme.sh --upgrade --auto-upgrade
-    ${HOME}/.acme.sh/acme.sh --set-default-ca --server letsencrypt
-}
-
-function update_acme_sh() {
-    ${HOME}/.acme.sh/acme.sh --upgrade
-}
-
-function purge_acme_sh() {
-    ${HOME}/.acme.sh/acme.sh --upgrade --auto-upgrade 0
-    ${HOME}/.acme.sh/acme.sh --uninstall
-    rm -rf ${HOME}/.acme.sh
-    rm -rf /var/www/_letsencrypt
-    rm -rf /etc/nginx/ssl
-}
-
-function config_xray() {
-    wget -O ${HOME}/config.json https://raw.githubusercontent.com/zxcvos/Xray-script/main/VLESS-XTLS-uTLS-REALITY/myself.json
-    xray_x25519=$(xray x25519)
-    private_key=$(echo ${xray_x25519} | awk '{print $3}')
-    public_key=$(echo ${xray_x25519} | awk '{print $6}')
-    jq --arg privateKey "${private_key}" '.xray.privateKey = $privateKey' /usr/local/etc/xray-script/config.json > /usr/local/etc/xray-script/new.json && mv -f /usr/local/etc/xray-script/new.json /usr/local/etc/xray-script/config.json
-    jq --arg publicKey "${public_key}" '.xray.publicKey = $publicKey' /usr/local/etc/xray-script/config.json > /usr/local/etc/xray-script/new.json && mv -f /usr/local/etc/xray-script/new.json /usr/local/etc/xray-script/config.json
-    jq --arg domain "${domain}" '.nginx.domain = $domain' /usr/local/etc/xray-script/config.json > /usr/local/etc/xray-script/new.json && mv -f /usr/local/etc/xray-script/new.json /usr/local/etc/xray-script/config.json
-    sed -i "s|xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx|$(cat /proc/sys/kernel/random/uuid)|" ${HOME}/config.json
-    sed -i "s|myself_dest|/dev/shm/nginx/h2c.sock|" ${HOME}/config.json
-    sed -i "s|myself_domain|${domain}|; s|myself_www_domain|www.${domain}|" ${HOME}/config.json
-    sed -i "s|xray x25519 Private key|${private_key}|" ${HOME}/config.json
-    sed -i "s|\"22\"|\"$(head -c 20 /dev/urandom | md5sum | head -c 2)\"|; s|\"4444\"|\"$(head -c 20 /dev/urandom | md5sum | head -c 4)\"|; s|\"88888888\"|\"$(head -c 20 /dev/urandom | md5sum | head -c 8)\"|; s|\"1616161616161616\"|\"$(head -c 20 /dev/urandom | md5sum | head -c 16)\"|" ${HOME}/config.json
-    mv -f ${HOME}/config.json /usr/local/etc/xray/config.json
-    _systemctl "restart" "xray"
-    sed -i "/\[::\]:443/d" /etc/nginx/sites-available/${domain}.conf
-    sed -i "s|\(listen .*\)443|\1unix:/dev/shm/nginx/h2c.sock|; s|\(http2 .*\)reuseport|\1proxy_protocol|" /etc/nginx/sites-available/${domain}.conf
-    sed -i "/h2c.sock/a \    set_real_ip_from        unix:;" /etc/nginx/sites-available/${domain}.conf
-    sed -i "/set_real_ip_from/a \    real_ip_header          proxy_protocol;" /etc/nginx/sites-available/${domain}.conf
-    _systemctl "restart" "nginx"
-}
-
-function config_nginx() {
-    [ -d /etc/nginx ] || mkdir -p /etc/nginx
-    [ -d /etc/nginx/conf.d ] || mkdir -p /etc/nginx/conf.d
-    cd /etc/nginx
-    [ -f /etc/nginx/conf.d/default.conf ] && grep -Eqv '^#' /etc/nginx/conf.d/default.conf && sed -i 's/^/#/' /etc/nginx/conf.d/default.conf
-    wget -O mime.types https://raw.githubusercontent.com/nginx/nginx/master/conf/mime.types
-    wget -O /etc/nginx/conf.d/restrict.conf https://raw.githubusercontent.com/zxcvos/Xray-script/main/config/restrict.conf
-    sed -i 's/^/#/' /etc/nginx/conf.d/restrict.conf
-    echo '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' | base64 --decode | tee /etc/nginx/nginxconfig.io-example.com.tar.gz > /dev/null
-    tar -xzvf nginxconfig.io-example.com.tar.gz | xargs chmod 0644
-    rm -rf nginxconfig.io-example.com.tar.gz
-    rm -rf sites-enabled/example.com.conf
-    mv sites-available/example.com.conf sites-available/${domain}.conf
-    ln -s /etc/nginx/sites-available/${domain}.conf /etc/nginx/sites-enabled/${domain}.conf
-    sed -i "/worker_connections/a \    use                epoll;" nginx.conf
-    sed -i "/ssl_protocols/i \    ssl_prefer_server_ciphers on;" nginx.conf
-    sed -i "/# Diffie-Hellman parameter for DHE ciphersuites/,/ssl_dhparam/d" nginx.conf
-    sed -i "/# non-www, subdomains redirect/,/# HTTP redirect/d" sites-available/${domain}.conf
-    sed -i "/ssl_trusted_certificate/d" sites-available/${domain}.conf
-    sed -i "s|https://www.example.com|https://\$host|" sites-available/${domain}.conf
-    sed -i "s|127.0.0.1:3000|unix:/dev/shm/cloudreve/cloudreve.sock|" sites-available/${domain}.conf
-    sed -i "/proxy_set_header Host/a \        proxy_redirect        off;" sites-available/${domain}.conf
-    sed -i "/proxy_redirect/a \        client_max_body_size  0;" sites-available/${domain}.conf
-    sed -i "s|www.example.com|${domain} www.${domain}|; s|\.example.com|\.${domain}|" sites-available/${domain}.conf
-    sed -i "s|/etc/letsencrypt/live/example.com|/etc/nginx/ssl/${domain}|" sites-available/${domain}.conf
-    sed -i "s|max-age=31536000|max-age=63072000|" nginxconfig.io/security.conf
-}
-
-function config_cloudreve() {
-    wget -O ${HOME}/conf.ini https://raw.githubusercontent.com/zxcvos/Xray-script/main/config/cloudreve.ini
-    mv -f ${HOME}/conf.ini /usr/local/cloudreve/conf.ini
-    sed -i "s|\$remote_addr|\$proxy_protocol_addr|" /etc/nginx/nginxconfig.io/proxy.conf
+  _info "正在卸载 Xray"
+  crontab -l | grep -v "/usr/local/etc/xray-script/update-dat.sh >/dev/null 2>&1" | crontab -
+  _systemctl "stop" "xray"
+  bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ remove --purge
+  rm -rf /etc/systemd/system/xray.service
+  rm -rf /etc/systemd/system/xray@.service
+  rm -rf /usr/local/bin/xray
+  rm -rf /usr/local/etc/xray
+  rm -rf /usr/local/share/xray
+  rm -rf /var/log/xray
 }
 
 function service_xray() {
-    wget -O ${HOME}/xray.service https://raw.githubusercontent.com/zxcvos/Xray-script/main/service/xray.service
-    mv -f ${HOME}/xray.service /etc/systemd/system/xray.service
-    _systemctl dr
+  _info "正在配置 xray.service"
+  wget -O ${HOME}/xray.service https://raw.githubusercontent.com/zxcvos/Xray-script/main/service/xray.service
+  mv -f ${HOME}/xray.service /etc/systemd/system/xray.service
+  _systemctl dr
 }
 
-function service_nginx() {
-    wget -O ${HOME}/nginx.service https://raw.githubusercontent.com/zxcvos/Xray-script/main/service/nginx.service
-    mv -f ${HOME}/nginx.service /etc/systemd/system/nginx.service
-    _systemctl dr
-}
-
-function service_cloudreve() {
-    wget -O ${HOME}/cloudreve.service https://raw.githubusercontent.com/zxcvos/Xray-script/main/service/cloudreve.service
-    mv -f ${HOME}/cloudreve.service /etc/systemd/system/cloudreve.service
-    _systemctl dr
-}
-
-function reset_cloudreve_data() {
-    _systemctl "stop" "cloudreve"
-    [ -e /usr/local/cloudreve/cloudreve.db ] && rm -rf /usr/local/cloudreve/cloudreve.db
-    local cloudreve_init="$(timeout 5s /usr/local/cloudreve/cloudreve)"
-    local cloudreve_password=$(printf "${cloudreve_init}" | grep "password" | awk '{print $6}')
-    _systemctl "start" "cloudreve"
-    _systemctl "restart" "nginx"
-    jq --arg password "${cloudreve_password}" '.cloudreve.password = $password' /usr/local/etc/xray-script/config.json > /usr/local/etc/xray-script/new.json && mv -f /usr/local/etc/xray-script/new.json /usr/local/etc/xray-script/config.json
-}
-
-function issue_cert() {
-    [ -d /var/www/_letsencrypt ] || mkdir -p /var/www/_letsencrypt
-    [ -d /etc/nginx/ssl/${domain} ] || mkdir -p /etc/nginx/ssl/${domain}
-    sed -i -r 's/(listen .*443)/\1; #/g; s/(ssl_(certificate|certificate_key) )/#;#\1/g; s/(server \{)/\1\n    ssl off;/g' /etc/nginx/sites-available/${domain}.conf
-    grep -Eqv '^#' /etc/nginx/conf.d/restrict.conf && sed -i 's/^/#/' /etc/nginx/conf.d/restrict.conf
-    nginx -t && _systemctl "restart" "nginx"
-    _error_detect "${HOME}/.acme.sh/acme.sh --issue --server letsencrypt -d ${domain} -d www.${domain} --webroot /var/www/_letsencrypt --keylength ec-256 --accountkeylength ec-256 --ocsp"
-    sed -i -r -z 's/#?; ?#//g; s/(server \{)\n    ssl off;/\1/g' /etc/nginx/sites-available/${domain}.conf
-    sed -i 's/^#//' /etc/nginx/conf.d/restrict.conf
-    _error_detect "${HOME}/.acme.sh/acme.sh --install-cert --ecc -d ${domain} -d www.${domain} --key-file /etc/nginx/ssl/${domain}/privkey.pem --fullchain-file /etc/nginx/ssl/${domain}/fullchain.pem --reloadcmd \"nginx -t && systemctl reload nginx\""
+function config_xray() {
+  _info "正在配置 xray config.json"
+  "${xray_config_manage}" --path ${HOME}/config.json --download
+  local xray_x25519=$(xray x25519)
+  local xs_private_key=$(echo ${xray_x25519} | awk '{print $3}')
+  local xs_public_key=$(echo ${xray_x25519} | awk '{print $6}')
+  # Xray-script config.json
+  jq --arg privateKey "${xs_private_key}" '.xray.privateKey = $privateKey' /usr/local/etc/xray-script/config.json >/usr/local/etc/xray-script/new.json && mv -f /usr/local/etc/xray-script/new.json /usr/local/etc/xray-script/config.json
+  jq --arg publicKey "${xs_public_key}" '.xray.publicKey = $publicKey' /usr/local/etc/xray-script/config.json >/usr/local/etc/xray-script/new.json && mv -f /usr/local/etc/xray-script/new.json /usr/local/etc/xray-script/config.json
+  # Xray-core config.json
+  "${xray_config_manage}" --path ${HOME}/config.json -p ${new_port}
+  "${xray_config_manage}" --path ${HOME}/config.json -u ${in_uuid}
+  "${xray_config_manage}" --path ${HOME}/config.json -d "$(jq -r '.xray.dest' /usr/local/etc/xray-script/config.json | grep -Eoi '([a-zA-Z0-9](\-?[a-zA-Z0-9])*\.)+[a-zA-Z]{2,}')"
+  "${xray_config_manage}" --path ${HOME}/config.json -sn "$(jq -c -r '.xray | .serverNames[.dest] | .[]' /usr/local/etc/xray-script/config.json | tr '\n' ',')"
+  "${xray_config_manage}" --path ${HOME}/config.json -x "${xs_private_key}"
+  "${xray_config_manage}" --path ${HOME}/config.json -rsid
+  mv -f ${HOME}/config.json /usr/local/etc/xray/config.json
+  _systemctl "restart" "xray"
 }
 
 function show_config() {
-    local IPv4=$(wget -qO- -t1 -T2 ipv4.icanhazip.com)
-    local c_ids=$(jq '.inbounds[] | select(.settings != null) | select(.protocol == "vless") | .settings.clients[].id' /usr/local/etc/xray/config.json | tr '\n' ',')
-    local public_key=$(jq '.xray.publicKey' /usr/local/etc/xray-script/config.json)
-    local SNI=$(jq -r '.nginx.domain' /usr/local/etc/xray-script/config.json)
-    local shortIds=$(jq '.inbounds[] | select(.settings != null) | select(.protocol == "vless") | .streamSettings.realitySettings.shortIds[]' /usr/local/etc/xray/config.json | tr '\n' ',')
-    echo -e "-------------- client config --------------"
-    echo -e "address     : \"${IPv4}\""
-    echo -e "port        : 443"
-    echo -e "id          : ${c_ids%,}"
-    echo -e "flow        : \"xtls-rprx-vision\""
-    echo -e "network     : \"tcp\""
-    echo -e "TLS         : \"reality\""
-    echo -e "SNI         : \"${SNI}\", \"www.${SNI}\""
-    echo -e "Fingerprint : \"chrome\""
-    echo -e "PublicKey   : ${public_key}"
-    echo -e "ShortId     : ${shortIds%,}"
-    echo -e "SpiderX     : \"/\""
-    echo -e "-------------------------------------------"
+  local IPv4=$(wget -qO- -t1 -T2 ipv4.icanhazip.com)
+  local xs_inbound=$(jq '.inbounds[] | select(.tag == "xray-script-xtls-reality")' /usr/local/etc/xray/config.json)
+  local xs_port=$(echo ${xs_inbound} | jq '.port')
+  local xs_protocol=$(echo ${xs_inbound} | jq '.protocol')
+  local xs_ids=$(echo ${xs_inbound} | jq '.settings.clients[] | .id' | tr '\n' ',')
+  local xs_public_key=$(jq '.xray.publicKey' /usr/local/etc/xray-script/config.json)
+  local xs_serverNames=$(echo ${xs_inbound} | jq '.streamSettings.realitySettings.serverNames[]' | tr '\n' ',')
+  local xs_shortIds=$(echo ${xs_inbound} | jq '.streamSettings.realitySettings.shortIds[]' | tr '\n' ',')
+  local xs_spiderX=$(jq '.xray.dest' /usr/local/etc/xray-script/config.json)
+  [ "${xs_spiderX}" == "${xs_spiderX##*/}" ] && xs_spiderX='"/"' || xs_spiderX="\"/${xs_spiderX#*/}"
+  echo -e "-------------- client config --------------"
+  echo -e "address     : \"${IPv4}\""
+  echo -e "port        : ${xs_port}"
+  echo -e "protocol    : ${xs_protocol}"
+  echo -e "id          : ${xs_ids%,}"
+  echo -e "flow        : \"xtls-rprx-vision\""
+  echo -e "network     : \"tcp\""
+  echo -e "TLS         : \"reality\""
+  echo -e "SNI         : ${xs_serverNames%,}"
+  echo -e "Fingerprint : \"chrome\""
+  echo -e "PublicKey   : ${xs_public_key}"
+  echo -e "ShortId     : ${xs_shortIds%,}"
+  echo -e "SpiderX     : ${xs_spiderX}"
+  echo -e "------------------------------------------"
+  read -p "是否生成分享链接[y/n]: " is_show_share_link
+  echo
+  if [[ ${is_show_share_link} =~ ^[Yy]$ ]]; then
+    show_share_link
+  else
+    echo -e "------------------------------------------"
     echo -e "${RED}此脚本仅供交流学习使用，请勿使用此脚本行违法之事。${NC}"
     echo -e "${RED}网络非法外之地，行非法之事，必将接受法律制裁。${NC}"
-    echo -e "-------------------------------------------"
+    echo -e "------------------------------------------"
+  fi
 }
 
-function show_cloudreve_config() {
-    local username=$(jq -r '.cloudreve.username' /usr/local/etc/xray-script/config.json)
-    local password=$(jq -r '.cloudreve.password' /usr/local/etc/xray-script/config.json)
-    echo -e "---------------- cloudreve ----------------"
-    echo -e "username    : ${username}"
-    echo -e "password    : ${password}"
-    echo -e "-------------------------------------------"
+function show_share_link() {
+  local sl=""
+  # share lnk contents
+  local sl_host=$(wget -qO- -t1 -T2 ipv4.icanhazip.com)
+  local sl_inbound=$(jq '.inbounds[] | select(.tag == "xray-script-xtls-reality")' /usr/local/etc/xray/config.json)
+  local sl_port=$(echo ${sl_inbound} | jq -r '.port')
+  local sl_protocol=$(echo ${sl_inbound} | jq -r '.protocol')
+  local sl_ids=$(echo ${sl_inbound} | jq -r '.settings.clients[] | .id')
+  local sl_public_key=$(jq -r '.xray.publicKey' /usr/local/etc/xray-script/config.json)
+  local sl_serverNames=$(echo ${sl_inbound} | jq -r '.streamSettings.realitySettings.serverNames[]')
+  local sl_shortIds=$(echo ${sl_inbound} | jq '.streamSettings.realitySettings.shortIds[]')
+  # share link fields
+  local sl_uuid=""
+  local sl_security='security=reality'
+  local sl_flow='flow=xtls-rprx-vision'
+  local sl_fingerprint='fp=chrome'
+  local sl_publicKey="pbk=${sl_public_key}"
+  local sl_sni=""
+  local sl_shortId=""
+  local sl_spiderX='spx=%2F'
+  local sl_descriptive_text='VLESS-XTLS-uTLS-REALITY'
+  # select show
+  _print_list "${sl_ids[@]}"
+  read -p "请选择生成分享链接的 UUID ，用英文逗号分隔， 默认全选: " pick_num
+  sl_id=($(select_data "$(awk 'BEGIN{ORS=","} {print}' <<<"${sl_ids[@]}")" "${pick_num}"))
+  _print_list "${sl_serverNames[@]}"
+  read -p "请选择生成分享链接的 serverName ，用英文逗号分隔， 默认全选: " pick_num
+  sl_serverNames=($(select_data "$(awk 'BEGIN{ORS=","} {print}' <<<"${sl_serverNames[@]}")" "${pick_num}"))
+  _print_list "${sl_shortIds[@]}"
+  read -p "请选择生成分享链接的 shortId ，用英文逗号分隔， 默认全选: " pick_num
+  sl_shortIds=($(select_data "$(awk 'BEGIN{ORS=","} {print}' <<<"${sl_shortIds[@]}")" "${pick_num}"))
+  
+  # Add user prompt for descriptive text
+  read -p "请输入分享链接的描述文本 (默认: VLESS-XTLS-uTLS-REALITY): " user_desc_text
+  if [[ -n "${user_desc_text}" ]]; then
+    sl_descriptive_text="${user_desc_text}"
+  fi
+  
+  echo -e "--------------- share link ---------------"
+  for sl_id in "${sl_ids[@]}"; do
+    sl_uuid="${sl_id}"
+    for sl_serverName in "${sl_serverNames[@]}"; do
+      sl_sni="sni=${sl_serverName}"
+      echo -e "---------- serverName ${sl_sni} ----------"
+      for sl_shortId in "${sl_shortIds[@]}"; do
+        [ "${sl_shortId//\"/}" != "" ] && sl_shortId="sid=${sl_shortId//\"/}" || sl_shortId=""
+        sl="${sl_protocol}://${sl_uuid}@${sl_host}:${sl_port}?${sl_security}&${sl_flow}&${sl_fingerprint}&${sl_publicKey}&${sl_sni}&${sl_spiderX}&${sl_shortId}"
+        echo "${sl%&}#${sl_descriptive_text}"
+      done
+      echo -e "------------------------------------------------"
+    done
+  done
+  echo -e "------------------------------------------"
+  echo -e "${RED}此脚本仅供交流学习使用，请勿使用此脚本行违法之事。${NC}"
+  echo -e "${RED}网络非法外之地，行非法之事，必将接受法律制裁。${NC}"
+  echo -e "------------------------------------------"
 }
 
 function menu() {
-    clear
-    echo -e "--------------- Xray-script ---------------"
-    echo -e " Version      : ${GREEN}v2023-03-15${NC}(${RED}beta${NC})"
-    echo -e " Description  : Xray 管理脚本"
-    echo -e "--------------- 装载管理 ---------------"
-    echo -e "${GREEN}1.${NC} 安装"
-    echo -e "${GREEN}2.${NC} 更新(待办)"
-    echo -e "${GREEN}3.${NC} 卸载"
-    echo -e "--------------- 操作管理 ---------------"
-    echo -e "${GREEN}4.${NC} 启动"
-    echo -e "${GREEN}5.${NC} 停止"
-    echo -e "${GREEN}6.${NC} 重启"
-    echo -e "--------------- 配置管理 ---------------"
-    echo -e "${GREEN}101.${NC} 查看配置"
-    echo -e "${GREEN}102.${NC} 信息统计"
-    echo -e "${GREEN}103.${NC} 修改 id"
-    echo -e "${GREEN}104.${NC} 修改 dest(待办)"
-    echo -e "${GREEN}105.${NC} 修改 serverNames(待办)"
-    echo -e "${GREEN}106.${NC} 修改 x25519 key"
-    echo -e "${GREEN}107.${NC} 修改 shortIds"
-    echo -e "${GREEN}108.${NC} 重置 cloudreve 账号密码"
-    echo -e "${GREEN}109.${NC} 查看 cloudreve 原始账号密码"
-    echo -e "--------------- 其他选项 ---------------"
-    echo -e "${GREEN}201.${NC} 更新至最新稳定版内核"
-    echo -e "${GREEN}202.${NC} 卸载多余内核"
-    echo -e "${GREEN}203.${NC} 修改 ssh 端口"
-    echo -e "${GREEN}204.${NC} 网络连接优化"
-    echo -e "----------------------------------------"
-    echo -e "${RED}0.${NC} 退出"
-    read -rp "Choose: " idx
-    if [[ ! -d /usr/local/etc/xray-script && (${idx} -ne 0 && ${idx} -ne 1 && ${idx} -lt 201) ]]; then
-        _error "未使用 Xray-script 进行安装"
+  check_os
+  clear
+  echo -e "--------------- Xray-script ---------------"
+  echo -e " Version      : ${GREEN}v2023-03-15${NC}(${RED}beta${NC})"
+  echo -e " Description  : Xray 管理脚本"
+  echo -e "----------------- 装载管理 ----------------"
+  echo -e "${GREEN}1.${NC} 安装"
+  echo -e "${GREEN}2.${NC} 更新"
+  echo -e "${GREEN}3.${NC} 卸载"
+  echo -e "----------------- 操作管理 ----------------"
+  echo -e "${GREEN}4.${NC} 启动"
+  echo -e "${GREEN}5.${NC} 停止"
+  echo -e "${GREEN}6.${NC} 重启"
+  echo -e "----------------- 配置管理 ----------------"
+  echo -e "${GREEN}101.${NC} 查看配置"
+  echo -e "${GREEN}102.${NC} 信息统计"
+  echo -e "${GREEN}103.${NC} 修改 id"
+  echo -e "${GREEN}104.${NC} 修改 dest"
+  echo -e "${GREEN}105.${NC} 修改 x25519 key"
+  echo -e "${GREEN}106.${NC} 修改 shortIds"
+  echo -e "${GREEN}107.${NC} 修改 xray 监听端口"
+  echo -e "${GREEN}108.${NC} 刷新已有的 shortIds"
+  echo -e "${GREEN}109.${NC} 追加自定义的 shortIds"
+  echo -e "${GREEN}110.${NC} 使用 WARP 分流，开启 OpenAI"
+  echo -e "----------------- 其他选项 ----------------"
+  echo -e "${GREEN}201.${NC} 更新至最新稳定版内核"
+  echo -e "${GREEN}202.${NC} 卸载多余内核"
+  echo -e "${GREEN}203.${NC} 修改 ssh 端口"
+  echo -e "${GREEN}204.${NC} 网络连接优化"
+  echo -e "-------------------------------------------"
+  echo -e "${RED}0.${NC} 退出"
+  read -rp "Choose: " idx
+  ! _is_digit "${idx}" && _error "请输入正确的选项值"
+  if [[ ! -d /usr/local/etc/xray-script && (${idx} -ne 0 && ${idx} -ne 1 && ${idx} -lt 201) ]]; then
+    _error "未使用 Xray-script 进行安装"
+  fi
+  if [ -d /usr/local/etc/xray-script ] && ([ ${idx} -gt 102 ] || [ ${idx} -lt 111 ]); then
+    wget -qO ${xray_config_manage} https://raw.githubusercontent.com/zxcvos/Xray-script/main/tool/xray_config_manage.sh
+    chmod a+x ${xray_config_manage}
+  fi
+  case "${idx}" in
+  1)
+    if [ ! -d /usr/local/etc/xray-script ]; then
+      mkdir -p /usr/local/etc/xray-script
+      wget -O /usr/local/etc/xray-script/config.json https://raw.githubusercontent.com/zxcvos/Xray-script/main/config/config.json
+      wget -O ${xray_config_manage} https://raw.githubusercontent.com/zxcvos/Xray-script/main/tool/xray_config_manage.sh
+      chmod a+x ${xray_config_manage}
+      install_dependencies
+      install_update_xray
+      local xs_port=$(jq '.xray.port' /usr/local/etc/xray-script/config.json)
+      read_port "xray config 配置默认使用: ${xs_port}" "${xs_port}"
+      read_uuid
+      select_dest
+      config_xray
+      show_config
     fi
-    case "${idx}" in
-        1)
-            if [ ! -d /usr/local/etc/xray-script ]; then
-                _read_domain
-                mkdir -p /usr/local/etc/xray-script
-                wget -O /usr/local/etc/xray-script/config.json https://raw.githubusercontent.com/zxcvos/Xray-script/main/config/config.json
-                install_dependencies
-                install_update_xray
-                install_update_nginx
-                service_nginx
-                install_update_cloudreve
-                service_cloudreve
-                install_acme_sh
-                config_nginx
-                config_cloudreve
-                issue_cert
-                config_xray
-                reset_cloudreve_data
-                show_cloudreve_config
-                show_config
-            fi
-        ;;
-        2)
-            # TODO: udpate
-            echo "TODO: udpate"
-        ;;
-        3)
-            if [ -d /usr/local/etc/xray-script ]; then
-                purge_xray
-                purge_nginx
-                purge_cloudreve
-                purge_acme_sh
-                rm -rf /usr/local/etc/xray-script
-            fi
-        ;;
-        4)
-            _systemctl "start" "xray"
-            _systemctl "start" "cloudreve"
-            _systemctl "start" "nginx"
-        ;;
-        5)
-            _systemctl "stop" "xray"
-            _systemctl "stop" "cloudreve"
-            _systemctl "stop" "nginx"
-        ;;
-        6)
-            _systemctl "restart" "xray"
-            _systemctl "restart" "cloudreve"
-            _systemctl "restart" "nginx"
-        ;;
-        101)
-            show_config
-        ;;
-        102)
-            [ -f /usr/local/etc/xray-script/traffic.sh ] || wget -O /usr/local/etc/xray-script/traffic.sh https://raw.githubusercontent.com/zxcvos/Xray-script/main/tool/traffic.sh
-            bash /usr/local/etc/xray-script/traffic.sh
-        ;;
-        103)
-            local arr_len=$(jq '.inbounds[] | select(.settings != null) | select(.protocol == "vless") | .settings.clients | length' /usr/local/etc/xray/config.json)
-            for i in $(seq 1 $arr_len)
-            do
-                local c_id=$(jq ".inbounds[] | select(.settings != null) | select(.protocol == \"vless\") | .settings.clients[${i}-1].id" /usr/local/etc/xray/config.json)
-                sed -i "s|${c_id}|\"$(cat /proc/sys/kernel/random/uuid)\"|" /usr/local/etc/xray/config.json
-            done
-            _systemctl "restart" "xray"
-            show_config
-        ;;
-        104)
-            # TODO: modify dest
-            echo -e "TODO: modify dest"
-            show_config
-        ;;
-        105)
-            # TODO: modify serverNames
-            echo -e "TODO: modify serverNames"
-            show_config
-        ;;
-        106)
-            xray_x25519=$(xray x25519)
-            private_key=$(echo ${xray_x25519} | awk '{print $3}')
-            public_key=$(echo ${xray_x25519} | awk '{print $6}')
-            local old_private_key=$(jq -r '.xray.privateKey' /usr/local/etc/xray-script/config.json)
-            sed -i "s|${old_private_key}|${private_key}|" /usr/local/etc/xray/config.json
-            jq --arg privateKey "${private_key}" '.xray.privateKey = $privateKey' /usr/local/etc/xray-script/config.json > /usr/local/etc/xray-script/new.json && mv -f /usr/local/etc/xray-script/new.json /usr/local/etc/xray-script/config.json
-            jq --arg publicKey "${public_key}" '.xray.publicKey = $publicKey' /usr/local/etc/xray-script/config.json > /usr/local/etc/xray-script/new.json && mv -f /usr/local/etc/xray-script/new.json /usr/local/etc/xray-script/config.json
-            _systemctl "restart" "xray"
-            show_config
-        ;;
-        107)
-            local arr_len=$(jq '.inbounds[] | select(.settings != null) | select(.protocol == "vless") | .streamSettings.realitySettings.shortIds | length' /usr/local/etc/xray/config.json)
-            for i in $(seq 1 $arr_len)
-            do
-                local shortId=$(jq ".inbounds[] | select(.settings != null) | select(.protocol == \"vless\") | .streamSettings.realitySettings.shortIds[${i}-1]" /usr/local/etc/xray/config.json)
-                local shortId_len=$(jq ".inbounds[] | select(.settings != null) | select(.protocol == \"vless\") | .streamSettings.realitySettings.shortIds[${i}-1] | length" /usr/local/etc/xray/config.json)
-                sed -i "s|${shortId}|\"$(head -c 20 /dev/urandom | md5sum | head -c ${shortId_len})\"|" /usr/local/etc/xray/config.json
-            done
-            _systemctl "restart" "xray"
-            show_config
-        ;;
-        108)
-            reset_cloudreve_data
-            show_cloudreve_config
-        ;;
-        109)
-            show_cloudreve_config
-        ;;
-        201)
-            bash <(wget -qO- https://raw.githubusercontent.com/zxcvos/system-automation-scripts/main/update-kernel.sh)
-        ;;
-        202)
-            bash <(wget -qO- https://raw.githubusercontent.com/zxcvos/system-automation-scripts/main/remove-kernel.sh)
-        ;;
-        203)
-            _read_ssh
-            sed -i "s/^[#pP].*ort\s*[0-9]*$/Port ${new_ssh_port}/" /etc/ssh/sshd_config
-            systemctl restart sshd
-        ;;
-        204)
-            wget -O /etc/sysctl.conf https://raw.githubusercontent.com/zxcvos/Xray-script/main/config/sysctl.conf
-            sysctl -p
-        ;;
-        0)
-            exit 0
-        ;;
-    esac
+    ;;
+  2)
+    _info "判断 Xray 是否用新版本"
+    local current_xray_version="$(jq -r '.xray.version' /usr/local/etc/xray-script/config.json)"
+    local latest_xray_version="$(wget -qO- --no-check-certificate https://api.github.com/repos/XTLS/Xray-core/releases | jq -r '.[0].tag_name ' | cut -d v -f 2)"
+    if [ "${latest_xray_version}" != "${current_xray_version}" ] && _version_ge "${latest_xray_version}" "${current_xray_version}"; then
+      _info "检测到有新版可用"
+      install_update_xray
+    else
+      _info "当前已是最新版本: ${current_xray_version}"
+    fi
+    ;;
+  3)
+    purge_xray
+    [ -f /usr/local/etc/xray-script/sysctl.conf.bak ] && mv -f /usr/local/etc/xray-script/sysctl.conf.bak /etc/sysctl.conf && _info "已还原网络连接设置"
+    rm -rf /usr/local/etc/xray-script
+    if docker ps | grep -q cloudflare-warp; then
+      _info '正在停止 cloudflare-warp'
+      docker container stop cloudflare-warp
+      docker container rm cloudflare-warp
+    fi
+    if docker images | grep -q e7h4n/cloudflare-warp; then
+      _info '正在卸载 cloudflare-warp'
+      docker image rm e7h4n/cloudflare-warp
+    fi
+    rm -rf ${HOME}/.warp
+    _info 'Docker 请自行卸载'
+    _info "已经完成卸载"
+    ;;
+  4)
+    _systemctl "start" "xray"
+    ;;
+  5)
+    _systemctl "stop" "xray"
+    ;;
+  6)
+    _systemctl "restart" "xray"
+    ;;
+  101)
+    show_config
+    ;;
+  102)
+    [ -f /usr/local/etc/xray-script/traffic.sh ] || wget -O /usr/local/etc/xray-script/traffic.sh https://raw.githubusercontent.com/zxcvos/Xray-script/main/tool/traffic.sh
+    bash /usr/local/etc/xray-script/traffic.sh
+    ;;
+  103)
+    read_uuid
+    _info "正在修改用户 id"
+    "${xray_config_manage}" -u "${in_uuid}"
+    _info "已成功修改用户 id"
+    _systemctl "restart" "xray"
+    show_config
+    ;;
+  104)
+    _info "正在修改 dest 与 serverNames"
+    select_dest
+    "${xray_config_manage}" -d "$(jq -r '.xray.dest' /usr/local/etc/xray-script/config.json | grep -Eoi '([a-zA-Z0-9](\-?[a-zA-Z0-9])*\.)+[a-zA-Z]{2,}')"
+    "${xray_config_manage}" -sn "$(jq -c -r '.xray | .serverNames[.dest] | .[]' /usr/local/etc/xray-script/config.json | tr '\n' ',')"
+    _info "已成功修改 dest 与 serverNames"
+    _systemctl "restart" "xray"
+    show_config
+    ;;
+  105)
+    _info "正在修改 x25519 key"
+    local xray_x25519=$(xray x25519)
+    local xs_private_key=$(echo ${xray_x25519} | awk '{print $3}')
+    local xs_public_key=$(echo ${xray_x25519} | awk '{print $6}')
+    # Xray-script config.json
+    jq --arg privateKey "${xs_private_key}" '.xray.privateKey = $privateKey' /usr/local/etc/xray-script/config.json >/usr/local/etc/xray-script/new.json && mv -f /usr/local/etc/xray-script/new.json /usr/local/etc/xray-script/config.json
+    jq --arg publicKey "${xs_public_key}" '.xray.publicKey = $publicKey' /usr/local/etc/xray-script/config.json >/usr/local/etc/xray-script/new.json && mv -f /usr/local/etc/xray-script/new.json /usr/local/etc/xray-script/config.json
+    # Xray-core config.json
+    "${xray_config_manage}" -x "${xs_private_key}"
+    _info "已成功修改 x25519 key"
+    _systemctl "restart" "xray"
+    show_config
+    ;;
+  106)
+    _info "shortId 值定义: 接受一个十六进制数值 ，长度为 2 的倍数，长度上限为 16"
+    _info "shortId 列表默认为值为[\"\"]，若有此项，客户端 shortId 可为空"
+    read -p "请输入自定义 shortIds 值，多个值以英文逗号进行分隔: " sid_str
+    _info "正在修改 shortIds"
+    "${xray_config_manage}" -sid "${sid_str}"
+    _info "已成功修改 shortIds"
+    _systemctl "restart" "xray"
+    show_config
+    ;;
+  107)
+    local xs_port=$(jq '.inbounds[] | select(.tag == "xray-script-xtls-reality") | .port' /usr/local/etc/xray/config.json)
+    read_port "当前 xray 监听端口为: ${xs_port}" "${xs_port}"
+    if [[ "${new_port}" && ${new_port} -ne ${xs_port} ]]; then
+      "${xray_config_manage}" -p ${new_port}
+      _info "当前 xray 监听端口已修改为: ${new_port}"
+      _systemctl "restart" "xray"
+      show_config
+    fi
+    ;;
+  108)
+    _info "正在修改 shortIds"
+    "${xray_config_manage}" -rsid
+    _info "已成功修改 shortIds"
+    _systemctl "restart" "xray"
+    show_config
+    ;;
+  109)
+    until [ ${#sid_str} -gt 0 ] && [ ${#sid_str} -le 16 ] && [ $((${#sid_str} % 2)) -eq 0 ]; do
+      _info "shortId 值定义: 接受一个十六进制数值 ，长度为 2 的倍数，长度上限为 16"
+      read -p "请输入自定义 shortIds 值，不能为空，多个值以英文逗号进行分隔: " sid_str
+    done
+    _info "正在添加自定义 shortIds"
+    "${xray_config_manage}" -asid "${sid_str}"
+    _info "已成功添加自定义 shortIds"
+    _systemctl "restart" "xray"
+    show_config
+    ;;
+  110)
+    if ! _exists "docker"; then
+      read -r -p "脚本使用 Docker 进行 WARP 管理，是否安装 Docker [y/n] " is_docker
+      if [[ ${is_docker} =~ ^[Yy]$ ]]; then
+        curl -fsSL https://get.docker.com | sh
+      else
+        _warn "取消分流操作"
+        exit 0
+      fi
+    fi
+    if docker ps | grep -q cloudflare-warp; then
+      _info "WARP 已开启，请勿重复设置"
+    else
+      _info "正在获取并启动 cloudflare-warp 镜像"
+      docker run -v $HOME/.warp:/var/lib/cloudflare-warp:rw --restart=always --name=cloudflare-warp e7h4n/cloudflare-warp
+      _info "正在配置 routing"
+      local routing='{"type":"field","domain":["domain:ipinfo.io","domain:ip.sb","geosite:openai"],"outboundTag":"warp"}'
+      _info "正在配置 outbounds"
+      local outbound=$(echo '{"tag":"warp","protocol":"socks","settings":{"servers":[{"address":"172.17.0.2","port":40001}]}}' | jq -c --arg addr "$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' cloudflare-warp)" '.settings.servers[].address = $addr')
+      jq --argjson routing "${routing}" '.routing.rules += [$routing]' /usr/local/etc/xray/config.json >/usr/local/etc/xray-script/new.json && mv -f /usr/local/etc/xray-script/new.json /usr/local/etc/xray/config.json
+      jq --argjson outbound "${outbound}" '.outbounds += [$outbound]' /usr/local/etc/xray/config.json >/usr/local/etc/xray-script/new.json && mv -f /usr/local/etc/xray-script/new.json /usr/local/etc/xray/config.json
+      _systemctl "restart" "xray"
+      show_config
+    fi
+    ;;
+  201)
+    bash <(wget -qO- https://raw.githubusercontent.com/zxcvos/system-automation-scripts/main/update-kernel.sh)
+    ;;
+  202)
+    bash <(wget -qO- https://raw.githubusercontent.com/zxcvos/system-automation-scripts/main/remove-kernel.sh)
+    ;;
+  203)
+    local ssh_port=$(sed -En "s/^[#pP].*ort\s*([0-9]*)$/\1/p" /etc/ssh/sshd_config)
+    read_port "当前 ssh 连接端口为: ${ssh_port}" "${ssh_port}"
+    if [[ "${new_port}" && ${new_port} -ne ${ssh_port} ]]; then
+      sed -i "s/^[#pP].*ort\s*[0-9]*$/Port ${new_port}/" /etc/ssh/sshd_config
+      systemctl restart sshd
+      _info "当前 ssh 连接端口已修改为: ${new_port}"
+    fi
+    ;;
+  204)
+    read -r -p "是否选择网络连接优化 [y/n] " is_opt
+    if [[ ${is_opt} =~ ^[Yy]$ ]]; then
+      [ -f /usr/local/etc/xray-script/sysctl.conf.bak ] || cp -af /etc/sysctl.conf /usr/local/etc/xray-script/sysctl.conf.bak
+      wget -O /etc/sysctl.conf https://raw.githubusercontent.com/zxcvos/Xray-script/main/config/sysctl.conf
+      sysctl -p
+    fi
+    ;;
+  0)
+    exit 0
+    ;;
+  *)
+    _error "请输入正确的选项值"
+    ;;
+  esac
 }
 
 [[ $EUID -ne 0 ]] && _error "This script must be run as root"
