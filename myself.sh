@@ -425,7 +425,7 @@ function show_share_link() {
   local sl_sni=""
   local sl_shortId=""
   local sl_spiderX='spx=%2F'
-  local sl_descriptive_text='Reality'
+  local sl_descriptive_text="VLESS-XTLS-uTLS-REALITY"
   
   # select show
   _print_list "${sl_ids[@]}"
@@ -437,7 +437,8 @@ function show_share_link() {
   _print_list "${sl_shortIds[@]}"
   read -p "请选择生成分享链接的 shortId ，用英文逗号分隔， 默认全选: " pick_num
   sl_shortIds=($(select_data "$(awk 'BEGIN{ORS=","} {print}' <<<"${sl_shortIds[@]}")" "${pick_num}"))
-  
+  read -p "请输入您需要生成的文件名(default: $sl_descriptive_text): " input_descriptive_text
+  sl_descriptive_text="${input_descriptive_text:-$sl_descriptive_text}"
   echo -e "--------------- share link ---------------"
   for sl_id in "${sl_ids[@]}"; do
     sl_uuid="${sl_id}"
