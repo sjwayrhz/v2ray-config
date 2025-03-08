@@ -426,6 +426,7 @@ function show_share_link() {
   local sl_shortId=""
   local sl_spiderX='spx=%2F'
   local sl_descriptive_text='VLESS-XTLS-uTLS-REALITY'
+  
   # select show
   _print_list "${sl_ids[@]}"
   read -p "请选择生成分享链接的 UUID ，用英文逗号分隔， 默认全选: " pick_num
@@ -437,11 +438,17 @@ function show_share_link() {
   read -p "请选择生成分享链接的 shortId ，用英文逗号分隔， 默认全选: " pick_num
   sl_shortIds=($(select_data "$(awk 'BEGIN{ORS=","} {print}' <<<"${sl_shortIds[@]}")" "${pick_num}"))
   
-  # Add user prompt for descriptive text
-  read -p "请输入分享链接的描述文本 (默认: VLESS-XTLS-uTLS-REALITY): " user_desc_text
+  # 在这里添加明显的分隔线
+  echo -e "---------- 分享链接描述设置 ----------"
+  echo -e "当前默认描述文本：${sl_descriptive_text}"
+  read -p "请输入分享链接的描述文本 (留空使用默认值): " user_desc_text
   if [[ -n "${user_desc_text}" ]]; then
     sl_descriptive_text="${user_desc_text}"
+    echo -e "将使用自定义描述文本: ${sl_descriptive_text}"
+  else
+    echo -e "将使用默认描述文本: ${sl_descriptive_text}"
   fi
+  echo -e "-------------------------------------"
   
   echo -e "--------------- share link ---------------"
   for sl_id in "${sl_ids[@]}"; do
@@ -458,8 +465,8 @@ function show_share_link() {
     done
   done
   echo -e "------------------------------------------"
-  echo -e "${RED}此脚本仅供交流学习使用，请勿使用此脚本行违法之事。${NC}"
-  echo -e "${RED}网络非法外之地，行非法之事，必将接受法律制裁。${NC}"
+  echo -e "${RED}突破网络封锁${NC}"
+  echo -e "${RED}实现自由民主${NC}"
   echo -e "------------------------------------------"
 }
 
